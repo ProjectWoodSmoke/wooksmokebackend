@@ -1,9 +1,16 @@
 const express = require('express');
-const { v4: uuidv4 } = require('uuid');
+const { v4: uuid4 } = require('uuid');
 const { Device, Reading, Alert, AlertThreshold } = require('../models');
 const { authenticate } = require('../middleware/authenticate');
 const { authorizeDevice } = require('../middleware/authorizeDevice');
-const { validateSensorData } = require('../middleware/validate');
+const { validateSensorData, validateSensorDataCompact, validateSensorDataUltraCompact } = require('../middleware/validate');
+const {
+  ULTRA_COMPACT_MAPPING,
+  UNIT_OVERRIDE_CODES,
+  UNKNOWN_MAPPING,
+  IAQ_ACCURACY_CODE,
+  isBsecOutputTrustworthy,
+} = require('../config/readingTypes');
 const router = express.Router();
 
 /**
@@ -105,6 +112,109 @@ const router = express.Router();
  *           description: The persisted Reading records (present on success).
  *           items:
  *             type: object
+ *
+ *     DevicePayloadCompact:
+ *       type: object
+ *       description: >
+ *         A group of readings from one device in a compact format to minimize payload size.
+ *       required:
+ *         - deviceId
+ *         - v
+ *         - u
+ *         - t
+ *       properties:
+ *         deviceId:
+ *           type: string
+ *           description: The unique identifier of the submitting device.
+ *           example: "BIOBOT-001"
+ *         v:
+ *           type: array
+ *           description: Array of numeric values.
+ *           items: { type: number }
+ *           example: [95.4, 12.1]
+ *         u:
+ *           type: array
+ *           description: Array of units matching the values.
+ *           items: { type: string }
+ *           example: ["°C", "%"]
+ *         t:
+ *           type: array
+ *           description: Array of reading types matching the values.
+ *           items: { type: string }
+ *           example: ["temperature", "humidity"]
+ *         ts:
+ *           type: array
+ *           description: Array of optional ISO 8601 timestamps. Use null for current server time.
+ *           items: { type: string, format: date-time, nullable: true }
+ *           example: ["2026-04-18T14:22:00.000Z", null]
+ *
+ *     UltraCompactReadingTuple:
+ *       type: array
+ *       description: >
+ *         A single reading within a snapshot: [typeIndex, value, optionalUnitOverride].
+ *         typeIndex mapping: 0=temperature(°C), 1=humidity(%), 2=smoke(ppm), 3=co(ppm),
+ *         4=pressure(hPa), 5=gas_resistance(kOhm), 6=altitude(m), 7=pm1(µg/m³),
+ *         8=pm25(µg/m³), 9=pm10(µg/m³), 10=obstructed (unitless boolean 0/1),
+ *         11=lightning_distance_km (km, only sent alongside a strike event),
+ *         12=lightning_energy (unitless relative value, only sent alongside a
+ *         strike event), 13=lightning_strike (unitless boolean 0/1),
+ *         14=lightning_disturber (unitless boolean 0/1),
+ *         15=iaq (0-500 index), 16=iaq_accuracy (0-3), 17=co2_equivalent
+ *         (ppm, estimated from VOCs — not a direct CO2 measurement),
+ *         18=breath_voc_equivalent (ppm), 19=gas_percentage (%),
+ *         20=bsec_stabilization (0/1), 21=bsec_run_in (0/1).
+ *         Codes 2 and 3 (smoke, co) are reserved for other device types and are
+ *         not emitted by air-quality-monitor devices.
+ *       minItems: 2
+ *       items:
+ *         oneOf:
+ *           - type: integer
+ *             description: Reading type index (see mapping above).
+ *           - type: number
+ *             description: The measurement value.
+ *           - type: integer
+ *             description: Optional unit-override code (rarely used; omitted in most readings).
+ *       example: [0, 25.51, null]
+ *
+ *     UltraCompactSnapshot:
+ *       type: array
+ *       description: >
+ *         One sensor-read cycle: [epochSeconds, readings]. A single epoch
+ *         timestamp (Unix seconds) is shared by every reading captured in
+ *         that cycle. For the lightning detector, a snapshot may be emitted
+ *         asynchronously (outside the normal periodic cadence) whenever the
+ *         AS3935 IRQ line fires, and will contain only the lightning_* codes
+ *         rather than the full environmental reading set.
+ *       minItems: 2
+ *       maxItems: 2
+ *       items:
+ *         oneOf:
+ *           - type: integer
+ *             description: Unix epoch seconds when this snapshot was taken.
+ *             example: 1785208895
+ *           - type: array
+ *             description: Reading tuples captured at this epoch.
+ *             items:
+ *               $ref: '#/components/schemas/UltraCompactReadingTuple'
+ *
+ *     DevicePayloadUltraCompact:
+ *       type: array
+ *       description: >
+ *         A single device's data in ultra-compact format: [deviceId, snapshots].
+ *         snapshots is an array of UltraCompactSnapshot entries, allowing a
+ *         device to batch multiple timestamped sensor-read cycles (up to
+ *         MAX_READINGS_BUFFER on-device) into a single submission.
+ *       minItems: 2
+ *       maxItems: 2
+ *       items:
+ *         oneOf:
+ *           - type: string
+ *             description: Device ID
+ *             example: "sensor-001"
+ *           - type: array
+ *             description: List of snapshots, one per sensor-read cycle.
+ *             items:
+ *               $ref: '#/components/schemas/UltraCompactSnapshot'
  *
  *     StoredReading:
  *       type: object
@@ -263,12 +373,154 @@ const router = express.Router();
  *                     - requestId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
  *                       success: false
  *                       error: "Device not found"
+ *
+ * /sensordata/compact:
+ *   post:
+ *     summary: Submit sensor readings in a compact format
+ *     description: >
+ *       An optimized version of the submission endpoint designed for
+ *       bandwidth-constrained devices (e.g. Blues Note cards).
+ *       Reduces JSON overhead by using arrays for reading components
+ *       instead of repeating object keys.
+ *     tags: [Sensor Data]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - requests
+ *             properties:
+ *               requests:
+ *                 type: array
+ *                 minItems: 1
+ *                 items:
+ *                   $ref: '#/components/schemas/DevicePayloadCompact'
+ *           example:
+ *             requests:
+ *               - deviceId: "BIOBOT-001"
+ *                 v: [95.4, 12.1]
+ *                 u: ["°C", "%"]
+ *                 t: ["temperature", "humidity"]
+ *                 ts: ["2026-04-18T14:22:00.000Z", null]
+ *     responses:
+ *       201:
+ *         description: All device payloads in the batch were processed successfully.
+ *       207:
+ *         description: Multi-Status — partial success.
+ *       400:
+ *         description: Bad request.
+ *
  *       401:
  *         description: Unauthorized — missing or invalid authentication token.
  *         content:
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
+ *
+ * /sensordata/ultra-compact:
+ *   post:
+ *     summary: Submit sensor readings in an ultra-compact format
+ *     description: >
+ *       The most optimized submission format for extremely bandwidth-constrained
+ *       scenarios (e.g. Notecard cellular/LoRa devices). Uses a nested array
+ *       structure, numeric type indices, and a single shared Unix-epoch
+ *       timestamp per batch of readings ("snapshot") rather than one
+ *       timestamp per value.
+ *
+ *
+ *       Each device entry is `[deviceId, snapshots]`. Each snapshot is
+ *       `[epochSeconds, readings]`, where `readings` is an array of
+ *       `[typeIndex, value]` (or `[typeIndex, value, unitOverrideCode]`)
+ *       tuples captured at that epoch. This lets a device buffer several
+ *       sensor-read cycles on-device and submit them all in one request
+ *       when it reconnects or on its regular sync interval.
+ *
+ *
+ *       typeIndex mapping: 0=temperature(°C), 1=humidity(%), 2=smoke(ppm),
+ *       3=co(ppm), 4=pressure(hPa), 5=gas_resistance(kOhm), 6=altitude(m),
+ *       7=pm1(µg/m³), 8=pm25(µg/m³), 9=pm10(µg/m³), 10=obstructed (0/1 flag),
+ *       11=lightning_distance_km (km), 12=lightning_energy (unitless relative
+ *       value), 13=lightning_strike (0/1 flag), 14=lightning_disturber (0/1
+ *       flag), 15=iaq (0-500 index), 16=iaq_accuracy (0-3), 17=co2_equivalent
+ *       (ppm, estimated), 18=breath_voc_equivalent (ppm), 19=gas_percentage
+ *       (%), 20=bsec_stabilization (0/1 flag), 21=bsec_run_in (0/1 flag).
+ *       Codes 2 and 3 are reserved for other device types.
+ *
+ *
+ *       Codes 15-21 come from the BME688's BSEC2 AI gas-sensing algorithm.
+ *       15, 17, 18 and 19 are all derived from the same internal gas model and
+ *       are only meaningful once it has calibrated: while the device reports
+ *       16=iaq_accuracy as 0, those four readings are still stored but are NOT
+ *       evaluated against alert thresholds, and the response reports how many
+ *       were held back in `results[].alertsSuppressed`. Code 5
+ *       (gas_resistance) is the raw heater measurement and is never gated.
+ *
+ *
+ *       Lightning readings (11-14) typically arrive in their own snapshot,
+ *       separate from the periodic environmental snapshot, since the AS3935
+ *       reports events asynchronously via its IRQ line rather than on a
+ *       fixed polling interval. A snapshot containing only [13, 0] and
+ *       [14, 1], for example, represents a disturber event with no actual
+ *       strike.
+ *     tags: [Sensor Data]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - d
+ *             properties:
+ *               d:
+ *                 type: array
+ *                 minItems: 1
+ *                 description: Array of [deviceId, snapshots] pairs, one entry per device.
+ *                 items:
+ *                   $ref: '#/components/schemas/DevicePayloadUltraCompact'
+ *           example:
+ *             d:
+ *               - - "sensor-001"
+ *                 - - - 1785208895
+ *                     - - [0, 25.51]
+ *                       - [1, 32.81]
+ *                       - [4, 952.28]
+ *                       - [5, 49.69]
+ *                       - [6, 520.45]
+ *                       - [7, 0]
+ *                       - [8, 0]
+ *                       - [9, 0]
+ *                   - - 1785208897
+ *                     - - [0, 25.50]
+ *                       - [1, 32.82]
+ *                       - [4, 952.27]
+ *                       - [5, 52.76]
+ *                       - [6, 520.54]
+ *                       - [7, 0]
+ *                       - [8, 0]
+ *                       - [9, 0]
+ *                   - - 1785208912
+ *                     - - [13, 1]
+ *                       - [14, 0]
+ *                       - [11, 6]
+ *                       - [12, 4823]
+ *     responses:
+ *       201:
+ *         description: All payloads processed successfully.
+ *       207:
+ *         description: Partial success.
+ *       400:
+ *         description: >
+ *           Bad request — either the top-level `d` array is missing/malformed,
+ *           a device entry does not match [deviceId, snapshots], a snapshot
+ *           does not match [epoch, readings], or a reading tuple does not
+ *           match [typeIndex, value].
  */
 
 /**
@@ -297,6 +549,111 @@ function formatMessage(template, value, unit) {
       .replace('{unit}', unit ?? '');
 }
 
+async function processSensorData(requests, res) {
+  // Loaded once per batch — the table is small and shared across all readings.
+  const thresholds = await AlertThreshold.findAll({ where: { enabled: true } });
+
+  const results = [];
+
+  for (const request of requests) {
+    const requestId = uuid4();
+    const { deviceId, readings } = request;
+
+    try {
+      if (!deviceId || !readings || !Array.isArray(readings)) {
+        results.push({
+          requestId,
+          success: false,
+          error: 'Invalid request format: missing deviceId or readings'
+        });
+        continue;
+      }
+
+      const device = await Device.findOne({ where: { deviceId } });
+      if (!device) {
+        results.push({
+          requestId,
+          success: false,
+          error: 'Device not found'
+        });
+        continue;
+      }
+
+      await device.update({ lastSeen: new Date() });
+
+      let suppressedAlertReadings = 0;
+
+      const createdReadings = await Promise.all(
+          readings.map(reading =>
+              Reading.create({
+                deviceId: device.id,
+                value: reading.value,
+                unit: reading.unit,
+                readingType: reading.readingType,
+                timestamp: reading.timestamp || new Date(),
+                requestId
+              })
+          )
+      );
+
+      // createdReadings is index-aligned with `readings`, so the input row
+      // supplies the per-reading `skipAlerts` flag the Sequelize instance lacks.
+      for (let i = 0; i < createdReadings.length; i++) {
+        const reading = createdReadings[i];
+
+        if (readings[i] && readings[i].skipAlerts) {
+          suppressedAlertReadings++;
+          continue;
+        }
+
+        const matchingThresholds = thresholds.filter(
+            t => t.readingType.toLowerCase() === reading.readingType.toLowerCase()
+        );
+
+        for (const threshold of matchingThresholds) {
+          if (exceedsThreshold(reading.value, threshold.operator, threshold.thresholdValue)) {
+            await Alert.create({
+              deviceId: device.id,
+              severity: threshold.severity,
+              message: formatMessage(threshold.message, reading.value, reading.unit),
+              triggeredAt: new Date(),
+              requestId
+            });
+          }
+        }
+      }
+
+      results.push({
+        requestId,
+        success: true,
+        message: 'Readings submitted successfully',
+        count: createdReadings.length,
+        // Readings stored but not threshold-checked because the sensor was
+        // still calibrating.
+        alertsSuppressed: suppressedAlertReadings,
+        readings: createdReadings
+      });
+    } catch (error) {
+      results.push({
+        requestId,
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const statusCode = successCount === results.length ? 201 :
+      successCount > 0 ? 207 : 400;
+
+  return res.status(statusCode).json({
+    totalRequests: results.length,
+    successful: successCount,
+    failed: results.length - successCount,
+    results
+  });
+}
+
 router.post('/sensordata', authenticate, validateSensorData, async (req, res) => {
   try {
     const { requests } = req.body;
@@ -307,98 +664,85 @@ router.post('/sensordata', authenticate, validateSensorData, async (req, res) =>
       });
     }
 
-    // Load all enabled thresholds once per batch — the table is small and
-    // thresholds are shared across all readings in this request.
-    const thresholds = await AlertThreshold.findAll({ where: { enabled: true } });
+    return await processSensorData(requests, res);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
 
-    const results = [];
+router.post('/sensordata/compact', authenticate, validateSensorDataCompact, async (req, res) => {
+  try {
+    const { requests } = req.body;
 
-    for (const request of requests) {
-      const requestId = uuidv4();
-      const { deviceId, readings } = request;
-
-      try {
-        if (!deviceId || !readings || !Array.isArray(readings)) {
-          results.push({
-            requestId,
-            success: false,
-            error: 'Invalid request format: missing deviceId or readings'
-          });
-          continue;
-        }
-
-        const device = await Device.findOne({ where: { deviceId } });
-        if (!device) {
-          results.push({
-            requestId,
-            success: false,
-            error: 'Device not found'
-          });
-          continue;
-        }
-
-        await device.update({ lastSeen: new Date() });
-
-        const createdReadings = await Promise.all(
-            readings.map(reading =>
-                Reading.create({
-                  deviceId: device.id,
-                  value: reading.value,
-                  unit: reading.unit,
-                  readingType: reading.readingType,
-                  timestamp: reading.timestamp || new Date(),
-                  requestId
-                })
-            )
-        );
-
-        // Evaluate every reading against every matching enabled threshold.
-        // A single reading can trigger multiple alerts (e.g. crossing both a
-        // "high" and a "critical" threshold for the same sensor type).
-        for (const reading of createdReadings) {
-          const matchingThresholds = thresholds.filter(
-              t => t.readingType.toLowerCase() === reading.readingType.toLowerCase()
-          );
-
-          for (const threshold of matchingThresholds) {
-            if (exceedsThreshold(reading.value, threshold.operator, threshold.thresholdValue)) {
-              await Alert.create({
-                deviceId: device.id,
-                severity: threshold.severity,
-                message: formatMessage(threshold.message, reading.value, reading.unit),
-                triggeredAt: new Date(),
-                requestId
-              });
-            }
-          }
-        }
-
-        results.push({
-          requestId,
-          success: true,
-          message: 'Readings submitted successfully',
-          count: createdReadings.length,
-          readings: createdReadings
-        });
-      } catch (error) {
-        results.push({
-          requestId,
-          success: false,
-          error: error.message
-        });
-      }
+    if (!requests || !Array.isArray(requests)) {
+      return res.status(400).json({
+        error: 'Invalid request format. Expected { requests: [...] }'
+      });
     }
 
-    const successCount = results.filter(r => r.success).length;
-    const statusCode = successCount === results.length ? 201 :
-        successCount > 0 ? 207 : 400;
-
-    res.status(statusCode).json({
-      totalRequests: results.length,
-      successful: successCount,
-      failed: results.length - successCount,
-      results
+    const expandedRequests = requests.map(req => {
+      const { deviceId, v, u, t, ts } = req;
+      const readings = v.map((value, i) => ({
+        value,
+        unit: u[i],
+        readingType: t[i],
+        timestamp: ts ? ts[i] : null
+      }));
+      return { deviceId, readings };
     });
+
+    return await processSensorData(expandedRequests, res);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+router.post('/sensordata/ultra-compact', authenticate, validateSensorDataUltraCompact, async (req, res) => {
+  try {
+    const { d } = req.body;
+
+    if (!d || !Array.isArray(d)) {
+      return res.status(400).json({
+        error: 'Invalid request format. Expected { d: [...] }'
+      });
+    }
+
+    // d = [ [deviceId, [ [epochSeconds, [ [typeIndex, value, unitOverride?], ... ]], ... ]], ... ]
+    const expandedRequests = d.map(entry => {
+      const [deviceId, snapshots] = entry;
+
+      const expandedReadings = [];
+
+      for (const snapshot of snapshots) {
+        const [epoch, readingPairs] = snapshot;
+        const timestamp = new Date(epoch > 10000000000 ? epoch : epoch * 1000);
+
+        // Read before the loop: it decides whether this snapshot's BSEC
+        // outputs are calibrated enough to raise alerts.
+        const accuracyPair = readingPairs.find(p => Array.isArray(p) && p[0] === IAQ_ACCURACY_CODE);
+        const iaqAccuracy = accuracyPair ? accuracyPair[1] : null;
+
+        for (const pair of readingPairs) {
+          const [typeIdx, value, unitOverrideIdx] = pair;
+          const mapping = ULTRA_COMPACT_MAPPING[typeIdx] || UNKNOWN_MAPPING;
+          const unit = unitOverrideIdx !== undefined && unitOverrideIdx !== null
+              ? (UNIT_OVERRIDE_CODES[unitOverrideIdx] ?? mapping.unit)
+              : mapping.unit;
+
+          expandedReadings.push({
+            value,
+            unit,
+            readingType: mapping.type,
+            timestamp,
+            skipAlerts: !isBsecOutputTrustworthy(mapping.type, iaqAccuracy)
+          });
+        }
+      }
+
+      return { deviceId, readings: expandedReadings };
+    });
+
+    return await processSensorData(expandedRequests, res);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -439,7 +783,7 @@ router.post('/sensordata', authenticate, validateSensorData, async (req, res) =>
  *         name: readingType
  *         schema:
  *           type: string
- *         description: Filter by sensor type (e.g. "temperature", "humidity", "smoke", "co").
+ *         description: Filter by sensor type (e.g. "temperature", "humidity", "smoke", "co", "lightning_strike").
  *         example: "temperature"
  *       - in: query
  *         name: startDate
@@ -706,11 +1050,9 @@ router.delete('/sensordata', authenticate, async (req, res) => {
     }
 
     if (readingId) {
-      // For readingId deletion: find the reading, then check ownership of its device
       const reading = await Reading.findByPk(readingId);
       if (!reading) return res.status(404).json({ error: 'Reading not found.' });
 
-      // Admins can delete any reading
       if (req.user.role !== 'admin') {
         const device = await Device.findByPk(reading.deviceId);
         if (!device) {
@@ -732,7 +1074,6 @@ router.delete('/sensordata', authenticate, async (req, res) => {
       return res.json({ message: 'Reading deleted successfully.' });
     }
 
-    // deviceId path — find device and check ownership
     const device = await Device.findOne({ where: { deviceId } });
     if (!device) return res.status(404).json({ error: 'Device not found.' });
 

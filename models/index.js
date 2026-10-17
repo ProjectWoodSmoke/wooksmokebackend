@@ -1,4 +1,3 @@
-// ========== models/index.js ==========
 const User = require('./User');
 const Location = require('./Location');
 const Device = require('./Device');

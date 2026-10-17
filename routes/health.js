@@ -146,7 +146,6 @@ router.get('/api/health/stats', async (req, res) => {
         startTime.setHours(now.getHours() - 24);
     }
 
-    // Get all requests in time range
     const requests = await ApiHealth.findAll({
       where: {
         timestamp: {

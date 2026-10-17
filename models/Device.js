@@ -1,8 +1,6 @@
-// Import Sequelize and your database instance
 const { DataTypes } = require('sequelize');
-const sequelize = require('../config/database'); // adjust path if needed
+const sequelize = require('../config/database');
 
-// Define the Device model
 const Device = sequelize.define('Device', {
   id: {
     type: DataTypes.INTEGER,
@@ -31,7 +29,8 @@ const Device = sequelize.define('Device', {
   },
   createdBy: {
     type: DataTypes.INTEGER,
-    allowNull: true,  // nullable so existing rows without an owner still load
+    // nullable so existing rows without an owner still load
+    allowNull: true,
     references: {
       model: 'Users',
       key: 'id'

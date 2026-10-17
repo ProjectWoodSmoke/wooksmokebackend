@@ -1,7 +1,3 @@
-/**
- * Seed: alert_thresholds (Exportable version for auto-seeding)
- */
-
 const { AlertThreshold } = require('../models');
 
 const DEFAULT_THRESHOLDS = [
@@ -71,6 +67,79 @@ const DEFAULT_THRESHOLDS = [
         severity:       'critical',
         message:        'Dangerous CO level detected: {value}{unit}',
         enabled:        true
+    },
+
+    // BME688 / BSEC2 outputs, only evaluated once the device reports
+    // iaq_accuracy >= 1 — see isBsecOutputTrustworthy in config/readingTypes.js.
+    // IAQ bands follow Bosch's published scale: 151–200 moderately polluted,
+    // 251–350 severely polluted, 351+ extremely polluted.
+    {
+        readingType:    'iaq',
+        operator:       '>',
+        thresholdValue: 150,
+        severity:       'medium',
+        message:        'Air quality degraded (moderately polluted) — IAQ {value}',
+        enabled:        true
+    },
+    {
+        readingType:    'iaq',
+        operator:       '>',
+        thresholdValue: 250,
+        severity:       'high',
+        message:        'Poor air quality (severely polluted) — IAQ {value}',
+        enabled:        true
+    },
+    {
+        readingType:    'iaq',
+        operator:       '>',
+        thresholdValue: 350,
+        severity:       'critical',
+        message:        'Extremely polluted air — ventilate immediately. IAQ {value}',
+        enabled:        true
+    },
+
+    // CO2-equivalent is estimated from VOCs, not measured, so these bands are
+    // ventilation guidance rather than a CO2 alarm.
+    {
+        readingType:    'co2_equivalent',
+        operator:       '>',
+        thresholdValue: 1000,
+        severity:       'low',
+        message:        'Estimated CO2 rising — consider ventilating: {value}{unit}',
+        enabled:        true
+    },
+    {
+        readingType:    'co2_equivalent',
+        operator:       '>',
+        thresholdValue: 2000,
+        severity:       'medium',
+        message:        'High estimated CO2 — ventilation recommended: {value}{unit}',
+        enabled:        true
+    },
+    {
+        readingType:    'co2_equivalent',
+        operator:       '>',
+        thresholdValue: 5000,
+        severity:       'high',
+        message:        'Very high estimated CO2: {value}{unit}',
+        enabled:        true
+    },
+
+    {
+        readingType:    'breath_voc_equivalent',
+        operator:       '>',
+        thresholdValue: 2,
+        severity:       'medium',
+        message:        'Elevated VOC level detected: {value}{unit}',
+        enabled:        true
+    },
+    {
+        readingType:    'breath_voc_equivalent',
+        operator:       '>',
+        thresholdValue: 5,
+        severity:       'high',
+        message:        'High VOC level detected: {value}{unit}',
+        enabled:        true
     }
 ];
 
@@ -105,13 +174,7 @@ async function seed(sequelize = null) {
 if (require.main === module) {
     require('dotenv').config();
     const sequelize = require('../config/database');
-    sequelize.authenticate()
-        .then(() => seed(sequelize))
-        .then(() => {
-            // We don't necessarily want to close here if it might still be retrying,
-            // but for a one-off run it's fine.
-            // process.exit(0);
-        });
+    sequelize.authenticate().then(() => seed(sequelize));
 }
 
 module.exports = { seed };

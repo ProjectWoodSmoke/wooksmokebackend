@@ -15,10 +15,6 @@ const handleValidationErrors = (req, res, next) => {
     next();
 };
 
-// ---------------------------------------------------------------------------
-// Reusable field rules
-// ---------------------------------------------------------------------------
-
 /** Safe plain-text string: printable chars only, no angle brackets or control chars */
 const safeName = (field, maxLen = 100) =>
     body(field)
@@ -35,10 +31,6 @@ const optionalSafeText = (field, maxLen = 500) =>
         .isLength({ max: maxLen }).withMessage(`${field} must be at most ${maxLen} characters`)
         .matches(/^[^<>"'%;()&+\x00-\x1F\x7F]*$/)
         .withMessage(`${field} contains invalid characters`);
-
-// ---------------------------------------------------------------------------
-// Validation chains per endpoint
-// ---------------------------------------------------------------------------
 
 const validateRegister = [
     body('username')
@@ -136,6 +128,48 @@ const validateAcknowledgeAlert = [
     handleValidationErrors
 ];
 
+/**
+ * Matches the firmware's batched send format:
+ *   { "d": [ [deviceId, [ [epochSeconds, [ [typeIndex, value], ... ]], ... ]], ... ] }
+ *
+ * Readings taken in the same sensor-read cycle share one snapshot timestamp.
+ * A reading pair may carry a third unit-override element, which the mapping
+ * layer handles and this chain does not require.
+ */
+const validateSensorDataUltraCompact = [
+    body('d')
+        .isArray({ min: 1 }).withMessage('d (data) must be a non-empty array'),
+
+    body('d.*')
+        .isArray({ min: 2, max: 2 }).withMessage('each device entry in d must be an array of [deviceId, snapshots]'),
+
+    body('d.*.0')
+        .isString().trim().notEmpty().withMessage('deviceId must be a string'),
+
+    body('d.*.1')
+        .isArray({ min: 1 }).withMessage('snapshots must be a non-empty array'),
+
+    body('d.*.1.*')
+        .isArray({ min: 2, max: 2 }).withMessage('each snapshot must be an array of [epoch, readings]'),
+
+    body('d.*.1.*.0')
+        .isInt({ min: 0 }).withMessage('snapshot timestamp must be a non-negative integer (Unix timestamp)'),
+
+    body('d.*.1.*.1')
+        .isArray({ min: 1 }).withMessage('snapshot readings must be a non-empty array'),
+
+    body('d.*.1.*.1.*')
+        .isArray({ min: 2 }).withMessage('each reading must be an array of at least [typeIndex, value]'),
+
+    body('d.*.1.*.1.*.0')
+        .isInt({ min: 0 }).withMessage('reading type index must be a non-negative integer'),
+
+    body('d.*.1.*.1.*.1')
+        .isNumeric().withMessage('reading value must be a number'),
+
+    handleValidationErrors
+];
+
 const validateSensorData = [
     body('requests')
         .isArray({ min: 1 }).withMessage('requests must be a non-empty array'),
@@ -171,6 +205,32 @@ const validateSensorData = [
     handleValidationErrors
 ];
 
+const validateSensorDataCompact = [
+    body('requests')
+        .isArray({ min: 1 }).withMessage('requests must be a non-empty array'),
+
+    body('requests.*.deviceId')
+        .trim()
+        .notEmpty().withMessage('each request must have a deviceId')
+        .isLength({ max: 100 }).withMessage('deviceId must be at most 100 characters')
+        .matches(/^[a-zA-Z0-9_:-]+$/).withMessage('deviceId contains invalid characters'),
+
+    body('requests.*.v')
+        .isArray({ min: 1 }).withMessage('v (values) must be a non-empty array'),
+
+    body('requests.*.u')
+        .isArray({ min: 1 }).withMessage('u (units) must be a non-empty array'),
+
+    body('requests.*.t')
+        .isArray({ min: 1 }).withMessage('t (types) must be a non-empty array'),
+
+    body('requests.*.ts')
+        .optional()
+        .isArray().withMessage('ts (timestamps) must be an array'),
+
+    handleValidationErrors
+];
+
 module.exports = {
     validateRegister,
     validateLogin,
@@ -178,5 +238,7 @@ module.exports = {
     validateCreateDevice,
     validatePatchDeviceStatus,
     validateAcknowledgeAlert,
-    validateSensorData
+    validateSensorData,
+    validateSensorDataCompact,
+    validateSensorDataUltraCompact
 };

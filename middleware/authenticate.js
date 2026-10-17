@@ -28,15 +28,12 @@ const authenticate = async (req, res, next) => {
 
       const matchedApiKey = candidate;
 
-      // Update last used timestamp
       await matchedApiKey.update({ lastUsedAt: new Date() });
 
-      // Attach user to request
       req.user = matchedApiKey.user;
       req.authType = 'apikey';
       return next();
     } else {
-      // Handle JWT token
       const decoded = jwt.verify(token, JWT_SECRET);
       const user = await User.findByPk(decoded.id);
 

@@ -42,7 +42,6 @@ let dbReadyCallback = null;
 
 sequelize.setDbReadyCallback = function(callback) {
   dbReadyCallback = callback;
-  // If we're already connected, immediately notify the new callback
   if (isConnected && dbReadyCallback) {
     dbReadyCallback(true, isSynchronized);
   }

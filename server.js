@@ -74,14 +74,11 @@ sequelize.setDbReadyCallback(async (ready, alreadySynced) => {
       sequelize.setDbSynchronized();
       console.log(chalk.green(' Database synchronized.'));
 
-      // Auto-seed thresholds if the table is empty
-      const { AlertThreshold } = require('./models');
-      const count = await AlertThreshold.count();
-      if (count === 0) {
-        console.log(chalk.yellow(' No alert thresholds found. Running seeder...'));
-        const { seed } = require('./seeders/alert-thresholds'); // Replaced v2 with merged seeder
-        await seed();
-      }
+      // Runs on every boot, not just on an empty table, so defaults added to
+      // the seeder later still reach existing deployments. The seeder only
+      // inserts, so operator-tuned thresholds survive.
+      const { seed } = require('./seeders/alert-thresholds');
+      await seed();
     } catch (err) {
       console.error(chalk.red(` Database sync error: ${err.message}`));
     }

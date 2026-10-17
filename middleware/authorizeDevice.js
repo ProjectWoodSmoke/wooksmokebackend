@@ -16,7 +16,6 @@ const { Device } = require('../models');
 const authorizeDevice = (paramName = 'id', paramSource = 'params', paramType = 'id') => {
     return async (req, res, next) => {
         try {
-            // Admins may operate on any device
             if (req.user.role === 'admin') {
                 return next();
             }
@@ -37,7 +36,7 @@ const authorizeDevice = (paramName = 'id', paramSource = 'params', paramType = '
                 return next();
             }
 
-            // Device has no owner yet (legacy row) deny non-admins to be safe
+            // Legacy rows have no owner, so deny non-admins rather than assume access
             if (device.createdBy === null) {
                 return res.status(403).json({
                     error: 'Forbidden: this device has no registered owner. Contact an administrator.'

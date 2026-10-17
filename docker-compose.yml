@@ -1,0 +1,57 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_DATABASE: iot_monitoring
+      MYSQL_ROOT_PASSWORD: password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-ppassword"]
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - DB_HOST=db
+      - DB_USER=root
+      - DB_PASSWORD=password
+      - DB_NAME=iot_monitoring
+      - DB_PORT=3306
+      - SHOW_SQL=true
+      - PORT=3000
+    depends_on:
+      db:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "6767:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_DATABASE_TYPE=mysql
+      - GF_DATABASE_HOST=db:3306
+      - GF_DATABASE_NAME=iot_monitoring
+      - GF_DATABASE_USER=root
+      - GF_DATABASE_PASSWORD=password
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  grafana_data:
